@@ -57,6 +57,9 @@ float wavfile::sample_from_channel_and_position(int channel, Uint32 position)
         Sint64 samplevalue = 0;
         for(auto i = 0; i < bytespersample; i++)
             samplevalue += data[memoryoffset+channeloffset+i] << i*8; // NOTE: LITTLE ENDIAN DATA
+        Sint64 signmask = 0x80 << ((bytespersample-1)*8);
+        if (samplevalue & signmask)
+            samplevalue = samplevalue-power(0x100, bytespersample);
         if (bytespersample == 1) // 8-bit WAV samples are unsigned, and WAV is how we define our memory buffer
             return (float)(*(Uint8*)(&samplevalue)-128)/datagain; // NOTE: LITTLE ENDIAN POINTER ABUSE
         else
@@ -316,6 +319,7 @@ void playfile(void * udata, Uint8 * stream, int len)
                     auto b = emitter->sample->sample_from_channel_and_position(i, ceil(point));
                     float fraction = point-floor(point);
                     transient += fraction*b + (1-fraction)*a;
+                    //transient += a;
                 }
 			}
 			Sint64 output = transient*stream_datagain;
@@ -352,7 +356,7 @@ int main(int argc, char * argv[])
 	
 	emitters.push_back(&output);
 	
-	want.freq = 8000;
+	want.freq = 44100;
     want.format = AUDIO_S16;
     want.channels = 2;
     want.samples = 1024;
