@@ -5,6 +5,7 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <math.h>
 #include <vector>
 #include <atomic>
 
@@ -42,9 +43,38 @@ struct wavfile
 	~wavfile();
 	void do_fmt(FILE *);
 	void do_data(FILE *);
+    float sample_from_channel_and_position(int channel, Uint32 position);
 };
 
-int normalize_float(void * smp)
+float wavfile::sample_from_channel_and_position(int channel, Uint32 position)
+{
+    if(!ready)
+        return 0;
+    auto memoryoffset = position*blocksize;
+    auto channeloffset = channel*bytespersample;
+    if(!isfloatingpoint)
+    {
+        Sint64 samplevalue = 0;
+        for(auto i = 0; i < bytespersample; i++)
+            samplevalue += data[memoryoffset+channeloffset+i] << i*8; // NOTE: LITTLE ENDIAN DATA
+        if (bytespersample == 1) // 8-bit WAV samples are unsigned, and WAV is how we define our memory buffer
+            return (float)(*(Uint8*)(&samplevalue)-128)/datagain; // NOTE: LITTLE ENDIAN POINTER ABUSE
+        else
+            return (float)(samplevalue)/datagain;
+    }
+    else
+    {
+        float x;
+        if(bytespersample == 4)
+            x = *(float*)(&data[memoryoffset+channeloffset]);
+        if(bytespersample == 8)
+            x = *(double*)(&data[memoryoffset+channeloffset]);
+        
+        return x/datagain;
+    }
+}
+
+int normalize_float(void * smp) // called on a thread
 {
 	wavfile * sample = (wavfile*)smp;
 	float highest = 1.0;
@@ -238,10 +268,11 @@ wavfile::~wavfile()
 struct emitter
 {
 	wavfile * sample;
-	Uint32 position;
+	Uint32 position; // Position is in OUTPUT SAMPLES, not SOUNDBYTE SAMPLES, i.e. it counts want.freqs not wavfile.freqs
 	float pan;
 	float volume;
 	float mixdown;
+    std::atomic<bool> playing;
 };
 std::vector<emitter*> emitters;
 
@@ -265,46 +296,27 @@ void playfile(void * udata, Uint8 * stream, int len)
 			float transient = 0.0f;
 			for(auto emitter : emitters)
 			{
-				if(!emitter->sample->ready)
+				if(!emitter->sample->ready or emitter->playing == false)
 					continue;
-				
-				auto memoryoffset = emitter->position*emitter->sample->blocksize;
-				auto channeloffset = i*emitter->sample->bytespersample;
-				
-				if(emitter->position >= emitter->sample->length)
+                
+				float ratefactor = emitter->sample->samplerate/(float)(got.freq); // stream samples to emitter samples
+                
+				if(ceil(emitter->position*ratefactor) >= emitter->sample->length)
+                {
+                    emitter->playing = false;
 					continue;
-				if(!emitter->sample->isfloatingpoint)
-				{
-					Sint64 samplevalue = 0;
-					for(auto i = 0; i < emitter->sample->bytespersample; i++)
-						samplevalue += emitter->sample->data[memoryoffset+channeloffset+i] << i*8; // NOTE: LITTLE ENDIAN DATA
-					if (emitter->sample->bytespersample == 1) // 8-bit WAV samples are unsigned, and WAV is how we define our memory buffer
-						transient += (float)(*(Uint8*)(&samplevalue)-128)/emitter->sample->datagain; // NOTE: LITTLE ENDIAN POINTER ABUSE
-					else
-						transient += (float)(samplevalue)/emitter->sample->datagain;
-				}
-				else
-				{
-					float x;
-					if(emitter->sample->bytespersample == 4)
-						x = *(float*)(&emitter->sample->data[memoryoffset+channeloffset]);
-					if(emitter->sample->bytespersample == 8)
-						x = *(double*)(&emitter->sample->data[memoryoffset+channeloffset]);
-					x *= emitter->mixdown / emitter->sample->datagain;
-					if(x > 1.0f)
-					{
-						puts("MIXDOWN +");
-						emitter->mixdown = 1.0f/x;
-						x = 1.0f;
-					}
-					if(x < -1.0f)
-					{
-						puts("MIXDOWN -");
-						emitter->mixdown = -1.0f/x;
-						x = -1.0f;
-					}
-					transient += x;
-				}
+                }
+                
+                if(ratefactor == 1)
+                    transient += emitter->sample->sample_from_channel_and_position(i, emitter->position);
+                else
+                {
+                    float point = ratefactor*emitter->position; // point is position on audio stream
+                    auto a = emitter->sample->sample_from_channel_and_position(i, floor(point));
+                    auto b = emitter->sample->sample_from_channel_and_position(i, ceil(point));
+                    float fraction = point-floor(point);
+                    transient += fraction*b + (1-fraction)*a;
+                }
 			}
 			Sint64 output = transient*stream_datagain;
 			Uint8 * outbytes = (Uint8 *)&output;
@@ -336,10 +348,11 @@ int main(int argc, char * argv[])
 	output.pan = 0.0f;
 	output.volume = 1.0f;
 	output.mixdown = 1.0f;
+    output.playing = true;
 	
 	emitters.push_back(&output);
 	
-	want.freq = 44100;
+	want.freq = 8000;
     want.format = AUDIO_S16;
     want.channels = 2;
     want.samples = 1024;
@@ -348,8 +361,8 @@ int main(int argc, char * argv[])
 	SDL_OpenAudio(&want, &got);
 	
     SDL_PauseAudio(0);
-	while(output.position < output.sample->length)
-		SDL_Delay(10);
+    while(output.playing)
+        SDL_Delay(10);
 	
 	return 0;
 }
