@@ -9,6 +9,8 @@
 #include <vector>
 #include <atomic>
 
+#include "resample.cpp"
+
 template <typename type>
 Uint64 power(type b, type n)
 {
@@ -312,14 +314,33 @@ void playfile(void * udata, Uint8 * stream, int len)
                 
                 if(ratefactor == 1)
                     transient += emitter->sample->sample_from_channel_and_position(i, emitter->position);
-                else
+                else if (ratefactor < 1) // upsample, use triangle filter to artificially create SUPER RETRO SOUNDING highs
                 {
                     float point = ratefactor*emitter->position; // point is position on audio stream
                     auto a = emitter->sample->sample_from_channel_and_position(i, floor(point));
                     auto b = emitter->sample->sample_from_channel_and_position(i, ceil(point));
                     float fraction = point-floor(point);
                     transient += fraction*b + (1-fraction)*a;
-                    //transient += a;
+                }
+                else // ratefactor > 1
+                {   // downsample, use triangle filter for laziness's sake
+                    float point = ratefactor*emitter->position; // point is position on emitter stream
+                    float sample = 0; // output sample
+                    
+                    float bottom = point-ratefactor/2; // window
+                    float top = point+ratefactor/2;
+                    float windowlen = top-bottom;
+                    
+                    int firstsample = ceil(bottom);
+                    int topsample = floor(top);
+                    
+                    for(auto j = firstsample; j <= topsample; j++) // convolution
+                    {
+                        sample += emitter->sample->sample_from_channel_and_position(i, j)
+                                  * (windowlen-abs(j-point))/windowlen; // triangle
+                    }
+                    sample /= windowlen;
+                    transient += sample;
                 }
 			}
 			Sint64 output = transient*stream_datagain;
@@ -334,7 +355,7 @@ void playfile(void * udata, Uint8 * stream, int len)
 		}
 		for(auto emitter : emitters)
 		{
-			emitter->position += 1;
+			emitter->position += 1; // n OUTPUT samples into EMITTER (opposed to EMITTER samples)
 		}
 		used += stream_bytespersample*channels;
 	}
@@ -356,7 +377,7 @@ int main(int argc, char * argv[])
 	
 	emitters.push_back(&output);
 	
-	want.freq = 44100;
+	want.freq = 8000;
     want.format = AUDIO_S16;
     want.channels = 2;
     want.samples = 1024;
