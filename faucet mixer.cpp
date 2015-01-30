@@ -9,8 +9,6 @@
 #include <vector>
 #include <atomic>
 
-#include "resample.cpp"
-
 template <typename type>
 Uint64 power(type b, type n)
 {
@@ -23,7 +21,6 @@ Uint64 power(type b, type n)
 		x *= b;
 	return x;
 }
-
 
 struct wavfile
 {
@@ -278,6 +275,7 @@ struct emitter
 	float volume;
 	float mixdown;
     std::atomic<bool> playing;
+    bool loop;
 };
 std::vector<emitter*> emitters;
 
@@ -324,22 +322,22 @@ void playfile(void * udata, Uint8 * stream, int len)
                 }
                 else // ratefactor > 1
                 {   // downsample, use triangle filter for laziness's sake
-                    float point = ratefactor*emitter->position; // point is position on emitter stream
-                    float sample = 0; // output sample
-                    
-                    float bottom = point-ratefactor/2; // window
-                    float top = point+ratefactor/2;
+                    // these NEED to be double or else Bad things will happen EVEN ON VERY LOW ADDRESSES
+                    double point = ratefactor*emitter->position; // point is position on emitter stream
+                    double bottom = point-ratefactor; // window
+                    double top = point+ratefactor;
                     float windowlen = top-bottom;
                     
-                    int firstsample = ceil(bottom);
-                    int topsample = floor(top);
-                    
-                    for(auto j = firstsample; j <= topsample; j++) // convolution
+                    float calibrate = 0; // convolution normalization
+                    float sample = 0; // output sample
+                    for(float j = ceil(bottom); j < top; j++) // convolution
                     {
-                        sample += emitter->sample->sample_from_channel_and_position(i, j)
-                                  * (windowlen-abs(j-point))/windowlen; // triangle
+                        float factor = j>point?j-point:point-j; // distance from output sample
+                        factor = ratefactor - factor; // convolution index of this sample
+                        calibrate += factor;
+                        sample += emitter->sample->sample_from_channel_and_position(i, j) * factor;
                     }
-                    sample /= windowlen;
+                    sample /= calibrate;
                     transient += sample;
                 }
 			}
@@ -374,6 +372,7 @@ int main(int argc, char * argv[])
 	output.volume = 1.0f;
 	output.mixdown = 1.0f;
     output.playing = true;
+    output.loop = true;
 	
 	emitters.push_back(&output);
 	
@@ -384,6 +383,8 @@ int main(int argc, char * argv[])
     want.callback = playfile;
     want.userdata = NULL;
 	SDL_OpenAudio(&want, &got);
+    
+    printf("%d\n", got.freq);
 	
     SDL_PauseAudio(0);
     while(output.playing)
