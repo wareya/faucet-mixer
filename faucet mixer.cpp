@@ -302,7 +302,7 @@ void playfile(void * udata, Uint8 * stream, int len)
 				if(!emitter->sample->ready or emitter->playing == false)
 					continue;
                 
-				float ratefactor = emitter->sample->samplerate/(float)(got.freq); // stream samples to emitter samples
+				float ratefactor = emitter->sample->samplerate/(float)(got.freq); // stream samples per emitter samples
                 
 				if(ceil(emitter->position*ratefactor) >= emitter->sample->length)
                 {
@@ -314,19 +314,24 @@ void playfile(void * udata, Uint8 * stream, int len)
                     transient += emitter->sample->sample_from_channel_and_position(i, emitter->position);
                 else if (ratefactor < 1) // upsample, use triangle filter to artificially create SUPER RETRO SOUNDING highs
                 {
-                    float point = ratefactor*emitter->position; // point is position on audio stream
-                    auto a = emitter->sample->sample_from_channel_and_position(i, floor(point));
-                    auto b = emitter->sample->sample_from_channel_and_position(i, ceil(point));
-                    float fraction = point-floor(point);
+                    // convert output position to surrounding input positions
+                    long long point = emitter->position * emitter->sample->samplerate;
+                    long outpoint1 = point/got.freq;
+                    long outpoint2 = point/got.freq + 1;
+                    
+                    //float point = ratefactor*emitter->position; // point is position on audio stream
+                    auto a = emitter->sample->sample_from_channel_and_position(i, outpoint1);
+                    auto b = emitter->sample->sample_from_channel_and_position(i, outpoint2);
+                    float fraction = (point%got.freq)/(float)(got.freq);
+                    //float fraction = point-floor(point);
                     transient += fraction*b + (1-fraction)*a;
                 }
                 else // ratefactor > 1
                 {   // downsample, use triangle filter for laziness's sake
-                    // these NEED to be double or else Bad things will happen EVEN ON VERY LOW ADDRESSES
-                    double point = ratefactor*emitter->position; // point is position on emitter stream
-                    double bottom = point-ratefactor; // window
-                    double top = point+ratefactor;
-                    float windowlen = top-bottom;
+                    float point = ratefactor*emitter->position; // point is position on emitter stream
+                    int bottom = ceil(point-ratefactor); // window
+                    int top = floor(point+ratefactor);
+                    float windowlen = ratefactor*2;
                     
                     float calibrate = 0; // convolution normalization
                     float sample = 0; // output sample
@@ -359,6 +364,62 @@ void playfile(void * udata, Uint8 * stream, int len)
 	}
 }
 
+/*
+ * faucmix_init
+ *  (int channels          // the number of channels in your output stream (You're on your own if you don't pick 2, sorry!)
+ *  ,int rate              // output sample rate in Hz. You should usually use 44.1khz or 48khz.
+ *  ,int format            // output format according to the SDL sample format enumeration. You should usually use AUDIO_S16.
+ *  ,int ahead             // number of samples to mix at once (passed straight to SDL) -- 1024 is a good default value for 44.1khz audio
+ *  )
+ * 
+ * faucmix_set_fadetime(float milliseconds) // set the period length which panning and volume changes interpolate over
+ * faucmix_set_volume(float volume) // sets the volume of faucmix as a whole
+ * 
+ * faucmix_close_device() // closes the output device, halting playback.
+ * faucmix_reopen_device(int channels, int rate, int format, int ahead) // opens a new audio device. can not be called unless faucmix_close_device has last been called.
+ * faucmix_close_everything() // closes everything, destroying all samples and emitters in memory. cancels running threads. allows faucmix_init to be used again.
+ */
+
+/*
+ * sample faucmix_sample_create(char * filename, bool normalize)
+ * int faucmix_sample_volume(sample, float32 volume)
+ * int faucmix_sample_kill(sample)
+ * 
+ * int faucmix_kill_all_samples(sample) // kills all samples.
+ */
+ 
+/*
+ * emitter faucmix_emitter_create(sample)
+ * int faucmix_emitter_kill(emitter) // stops an emitter immediately and destroys it, deallocating its data.
+ * int faucmix_emitter_killgradeful(emitter) // gracefully stop an emitter and kill it once it's stopped
+ * 
+ * int faucmix_emitter_fire(emitter) // plays the emitter once. hijacks existing playbacks.
+ * int faucmix_emitter_loop(emitter) // plays the emitter and starts looping it. does not hijack existing playbacks.
+ * int faucmix_emitter_fireloop(emitter, emitter) // plays one emitter, then starts looping a second one the moment the first one finishes.
+ *                                                // if the first emitter is stopped or killed before it finishes, the second doesn't play.
+ * int faucmix_emitter_stop(emitter) // immediately stops an emitter
+ * int faucmix_emitter_stopgraceful(emitter) // stops an emitter once it's finished its current play period (useful for loops)
+ * 
+ * int faucmix_emitter_all_stop(emitter) // immediately stops all emitters.
+ * 
+ * int faucmix_emitter_volume(emitter, float volume) // sets an emitter's volume to x (does not affect panning) (uses peak channel)
+ * int faucmix_emitter_volumes(emitter, float left, float right) // sets an emitter's volume between the left and right channels
+ * int faucmix_emitter_pan(emitter, float left) // sets an emitter's panning from -1 left to 1 right (uses peak channel)
+ * 
+ * float faucmix_emitter_get_volume(emitter) // gets the faucmix internal volume for the emitter (uses peak channel)
+ * float faucmix_emitter_get_volume_right(emitter) // gets the faucmix internal right channel volume for the emitter
+ * float faucmix_emitter_get_volume_left(emitter)
+ * float faucmix_emitter_get_pan(emitter) // returns the balance between the left and right channels (from -1 to 1)
+ * float faucmix_emitter_get_playing(emitter) // returns whether the emitter is currently playing
+ * 
+ * int faucmix_kill_all_emitters(emitter) // kills all emitters.
+ */
+ 
+ /*
+ * int faucmix_count_emitters(emitter) // returns the number of emitters currently in the system
+ * int faucmix_count_samples(emitter) // returns the number of samples
+ * int faucmix_count_emitters_by_sample(emitter) // returns the number of emitters with a given sample
+ */
 int main(int argc, char * argv[])
 {
 	if(argc == 1)
@@ -376,7 +437,7 @@ int main(int argc, char * argv[])
 	
 	emitters.push_back(&output);
 	
-	want.freq = 8000;
+	want.freq = 41000;
     want.format = AUDIO_S16;
     want.channels = 2;
     want.samples = 1024;
